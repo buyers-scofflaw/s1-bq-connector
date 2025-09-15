@@ -1,0 +1,17 @@
+substitutions:
+  _REGION: us-central1
+  _PROJECT: carbon-storm-422904-n0
+  _JOB: s1-ad-hourly
+
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - deploy
+      - ${_JOB}
+      - --source=.
+      - --region=${_REGION}
+      - --project=${_PROJECT}
+      # no --set-env-vars here; set them once on the job and they persist
