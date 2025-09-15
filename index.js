@@ -1,3 +1,5 @@
+// index.js — S1 (ad_widget_daily) → GCS → BigQuery (hourly-friendly)
+
 import fetch from 'node-fetch';
 import { BigQuery } from '@google-cloud/bigquery';
 import { Storage } from '@google-cloud/storage';
@@ -15,7 +17,7 @@ const BQ_PROJECT  = process.env.BQ_PROJECT;
 const BQ_DATASET  = process.env.BQ_DATASET || 'rsoc_clicks';
 const BQ_FINAL    = process.env.BQ_TABLE   || 's1_ad_widget_daily'; // destination table (partitioned by date)
 
-// Robust bucket handling: accept either GCS_BUCKET (with or without gs://) or GCS_BUCKET_NAME
+// Robust bucket handling: accept either GCS_BUCKET (with or w/o gs://) or GCS_BUCKET_NAME
 const RAW_BUCKET  = process.env.GCS_BUCKET || process.env.GCS_BUCKET_NAME;
 const BUCKET_NAME = RAW_BUCKET ? RAW_BUCKET.replace(/^gs:\/\//, '') : '';
 const GCS_PREFIX  = process.env.GCS_PREFIX || 's1';    // folder under the bucket
@@ -28,8 +30,8 @@ const storage = new Storage();
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function targetYMD() {
-  if (DATE) return DATE;                // backfill or fixed day
-  const d = new Date();                 // hourly refresh for today (UTC)
+  if (DATE) return DATE;                // fixed backfill date, if provided
+  const d = new Date();                 // otherwise: "today" (UTC) for hourly refresh
   return d.toISOString().slice(0,10);
 }
 
@@ -47,7 +49,7 @@ async function requestReport(auth_key) {
 async function pollStatus(reportId, auth_key) {
   const url = `${HOST}/partner/v1/report/${encodeURIComponent(reportId)}/status?auth_key=${encodeURIComponent(auth_key)}`;
   let tries = 0;
-  while (tries < 60) { // up to ~30 min
+  while (tries < 60) { // up to ~30 minutes
     const res = await fetch(url);
     if (res.status === 429) {
       const ra = Number(res.headers.get('Retry-After') || 30);
@@ -91,7 +93,7 @@ async function downloadToGCS(contentUrl, bucketName, objectPath) {
 
 // BigQuery LOAD job that reads directly from GCS (no local fs)
 async function loadCsvGzToBQ(gcsUri) {
-  const location = 'US'; // adjust if your dataset is elsewhere
+  const location = 'US'; // adjust if your dataset is in another location
   const jobConfig = {
     location,
     configuration: {
@@ -99,9 +101,9 @@ async function loadCsvGzToBQ(gcsUri) {
         destinationTable: {
           projectId: BQ_PROJECT,
           datasetId: BQ_DATASET,
-        tableId:   BQ_FINAL
+          tableId:   BQ_FINAL
         },
-        sourceUris: [ gcsUri ],
+        sourceUris: [ gcsUri ],    // GCS URI(s)
         sourceFormat: 'CSV',
         autodetect: true,
         fieldDelimiter: ',',
