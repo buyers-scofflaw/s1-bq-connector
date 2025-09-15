@@ -15,3 +15,5 @@ steps:
       - --region=${_REGION}
       - --project=${_PROJECT}
       # no --set-env-vars here; set them once on the job and they persist
+options:
+  logging: CLOUD_LOGGING_ONLY
