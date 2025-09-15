@@ -16,4 +16,5 @@ steps:
       - --project=${_PROJECT}
       # no --set-env-vars here; set them once on the job and they persist
 options:
-  logging: CLOUD_LOGGING_ONLY
+  defaultLogsBucketBehavior: REGIONAL_USER_OWNED_BUCKET
+  logging: CLOUD_LOGGING_ONLY   # (optional, you can omit if you prefer GCS logs)
