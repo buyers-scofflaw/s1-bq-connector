@@ -1,4 +1,4 @@
-// index.js — S1 (ad_widget_daily) → GCS → BigQuery (hourly-friendly)
+// index.js — S1 (ad_widget_daily) → GCS → BigQuery
 
 import fetch from 'node-fetch';
 import { BigQuery } from '@google-cloud/bigquery';
@@ -7,20 +7,20 @@ import { Storage } from '@google-cloud/storage';
 /* ========== ENV ========== */
 const HOST        = process.env.S1_HOST || 'https://reports.system1.com';
 const REPORT_TYPE = process.env.S1_REPORT_TYPE || 'syndication_rsoc_online_ad_widget_daily';
-const DAYS        = process.env.S1_DAYS || '1';        // daily grain
-const DATE        = process.env.S1_DATE || '';         // YYYY-MM-DD or blank (today)
+const DAYS        = process.env.S1_DAYS || '1';
+const DATE        = process.env.S1_DATE || '';
 
-const AUTH_KEY    = process.env.S1_AUTH_KEY;           // single-site key
-const SITE_NAME   = process.env.SITE_NAME || 'site';   // label for folder & final table
+const AUTH_KEY    = process.env.S1_AUTH_KEY;
+const SITE_NAME   = process.env.SITE_NAME || 'site';
 
 const BQ_PROJECT  = process.env.BQ_PROJECT;
 const BQ_DATASET  = process.env.BQ_DATASET || 'rsoc_clicks';
-const BQ_FINAL    = process.env.BQ_TABLE   || 's1_ad_widget_daily'; // destination table (partitioned by date)
+const BQ_FINAL    = process.env.BQ_TABLE   || 's1_ad_widget_daily';
 
-// Robust bucket handling: accept either GCS_BUCKET (with or w/o gs://) or GCS_BUCKET_NAME
+// Robust bucket handling
 const RAW_BUCKET  = process.env.GCS_BUCKET || process.env.GCS_BUCKET_NAME;
 const BUCKET_NAME = RAW_BUCKET ? RAW_BUCKET.replace(/^gs:\/\//, '') : '';
-const GCS_PREFIX  = process.env.GCS_PREFIX || 's1';    // folder under the bucket
+const GCS_PREFIX  = process.env.GCS_PREFIX || 's1';
 
 /* ========== CLIENTS ========== */
 const bq = new BigQuery({ projectId: BQ_PROJECT });
@@ -30,9 +30,9 @@ const storage = new Storage();
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function targetYMD() {
-  if (DATE) return DATE;                // fixed backfill date, if provided
-  const d = new Date();                 // otherwise: "today" (UTC) for hourly refresh
-  return d.toISOString().slice(0,10);
+  if (DATE) return DATE;
+  const d = new Date();
+  return d.toISOString().slice(0,10); // YYYY-MM-DD UTC
 }
 
 async function requestReport(auth_key) {
@@ -49,7 +49,7 @@ async function requestReport(auth_key) {
 async function pollStatus(reportId, auth_key) {
   const url = `${HOST}/partner/v1/report/${encodeURIComponent(reportId)}/status?auth_key=${encodeURIComponent(auth_key)}`;
   let tries = 0;
-  while (tries < 60) { // up to ~30 minutes
+  while (tries < 60) {
     const res = await fetch(url);
     if (res.status === 429) {
       const ra = Number(res.headers.get('Retry-After') || 30);
@@ -91,9 +91,9 @@ async function downloadToGCS(contentUrl, bucketName, objectPath) {
   console.log(`[debug] downloaded to gs://${bucketName}/${objectPath}`);
 }
 
-// BigQuery LOAD job that reads directly from GCS (no local fs)
+// BigQuery LOAD job (server-side read from GCS)
 async function loadCsvGzToBQ(gcsUri) {
-  const location = 'US'; // adjust if your dataset is in another location
+  const location = 'US'; // adjust if your dataset is elsewhere
   const jobConfig = {
     location,
     configuration: {
@@ -103,7 +103,7 @@ async function loadCsvGzToBQ(gcsUri) {
           datasetId: BQ_DATASET,
           tableId:   BQ_FINAL
         },
-        sourceUris: [ gcsUri ],    // GCS URI(s)
+        sourceUris: [ gcsUri ],
         sourceFormat: 'CSV',
         autodetect: true,
         fieldDelimiter: ',',
