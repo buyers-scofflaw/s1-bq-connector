@@ -5,20 +5,20 @@ import { Storage } from '@google-cloud/storage';
 /* ========== ENV ========== */
 const HOST        = process.env.S1_HOST || 'https://reports.system1.com';
 const REPORT_TYPE = process.env.S1_REPORT_TYPE || 'syndication_rsoc_online_ad_widget_daily';
-const DAYS        = process.env.S1_DAYS || '1';      // keep "1" for daily grain
-const DATE        = process.env.S1_DATE || '';       // YYYY-MM-DD or empty (today)
+const DAYS        = process.env.S1_DAYS || '1';        // daily grain
+const DATE        = process.env.S1_DATE || '';         // YYYY-MM-DD or blank (today)
 
-const AUTH_KEY    = process.env.S1_AUTH_KEY;         // single-site key
-const SITE_NAME   = process.env.SITE_NAME || 'site'; // optional label
+const AUTH_KEY    = process.env.S1_AUTH_KEY;           // single-site key
+const SITE_NAME   = process.env.SITE_NAME || 'site';   // label for folder & final table
 
 const BQ_PROJECT  = process.env.BQ_PROJECT;
 const BQ_DATASET  = process.env.BQ_DATASET || 'rsoc_clicks';
-const BQ_FINAL    = process.env.BQ_TABLE   || 's1_ad_widget_daily';  // final table
+const BQ_FINAL    = process.env.BQ_TABLE   || 's1_ad_widget_daily'; // destination table (partitioned by date)
 
-// NEW: robust bucket handling (never treat 's1' as bucket)
-const RAW_BUCKET  = process.env.GCS_BUCKET || process.env.GCS_BUCKET_NAME; // accept either
-const BUCKET_NAME = RAW_BUCKET ? RAW_BUCKET.replace(/^gs:\/\//, '') : '';  // strip gs:// if present
-const GCS_PREFIX  = process.env.GCS_PREFIX || 's1';
+// Robust bucket handling: accept either GCS_BUCKET (with or without gs://) or GCS_BUCKET_NAME
+const RAW_BUCKET  = process.env.GCS_BUCKET || process.env.GCS_BUCKET_NAME;
+const BUCKET_NAME = RAW_BUCKET ? RAW_BUCKET.replace(/^gs:\/\//, '') : '';
+const GCS_PREFIX  = process.env.GCS_PREFIX || 's1';    // folder under the bucket
 
 /* ========== CLIENTS ========== */
 const bq = new BigQuery({ projectId: BQ_PROJECT });
@@ -28,9 +28,9 @@ const storage = new Storage();
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function targetYMD() {
-  if (DATE) return DATE;
-  const d = new Date();            // hourly refresh for "today"
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+  if (DATE) return DATE;                // backfill or fixed day
+  const d = new Date();                 // hourly refresh for today (UTC)
+  return d.toISOString().slice(0,10);
 }
 
 async function requestReport(auth_key) {
@@ -47,7 +47,7 @@ async function requestReport(auth_key) {
 async function pollStatus(reportId, auth_key) {
   const url = `${HOST}/partner/v1/report/${encodeURIComponent(reportId)}/status?auth_key=${encodeURIComponent(auth_key)}`;
   let tries = 0;
-  while (tries < 60) { // up to ~30 minutes
+  while (tries < 60) { // up to ~30 min
     const res = await fetch(url);
     if (res.status === 429) {
       const ra = Number(res.headers.get('Retry-After') || 30);
@@ -66,7 +66,7 @@ async function pollStatus(reportId, auth_key) {
     }
     if (s === 'FAILED') throw new Error('Report FAILED');
     if (s === 'RUNNING') {
-      await sleep(30 * 1000); // ~30s between polls
+      await sleep(30 * 1000);
       tries++;
       continue;
     }
@@ -75,7 +75,7 @@ async function pollStatus(reportId, auth_key) {
   throw new Error('Timed out waiting for SUCCESS');
 }
 
-// NEW: take bucket + object path separately (avoid mis-parsing)
+// Download contentUrl → GCS (bucketName + objectPath are passed separately)
 async function downloadToGCS(contentUrl, bucketName, objectPath) {
   const res = await fetch(contentUrl, { redirect: 'follow' });
   if (!res.ok) throw new Error(`Download failed ${res.status}`);
@@ -89,17 +89,35 @@ async function downloadToGCS(contentUrl, bucketName, objectPath) {
   console.log(`[debug] downloaded to gs://${bucketName}/${objectPath}`);
 }
 
+// BigQuery LOAD job that reads directly from GCS (no local fs)
 async function loadCsvGzToBQ(gcsUri) {
-  // LOAD job into the final table (append; the table already has desired schema/partitioning)
-  const [ job ] = await bq.dataset(BQ_DATASET).table(BQ_FINAL).load(gcsUri, {
-    sourceFormat: 'CSV',
-    autodetect: true,
-    fieldDelimiter: ',',
-    skipLeadingRows: 1,
-    writeDisposition: 'WRITE_APPEND'
-  });
-  const [ meta ] = await job.getMetadata();
-  if (meta.status?.errorResult) throw new Error(`BQ load error: ${JSON.stringify(meta.status)}`);
+  const location = 'US'; // adjust if your dataset is elsewhere
+  const jobConfig = {
+    location,
+    configuration: {
+      load: {
+        destinationTable: {
+          projectId: BQ_PROJECT,
+          datasetId: BQ_DATASET,
+        tableId:   BQ_FINAL
+        },
+        sourceUris: [ gcsUri ],
+        sourceFormat: 'CSV',
+        autodetect: true,
+        fieldDelimiter: ',',
+        skipLeadingRows: 1,
+        writeDisposition: 'WRITE_APPEND'
+      }
+    }
+  };
+
+  const [job] = await bq.createJob(jobConfig);
+  console.log(`[debug] started BQ load job: ${job.id}`);
+  const [meta] = await job.getMetadata();
+
+  if (meta.status?.errorResult) {
+    throw new Error(`BQ load error: ${JSON.stringify(meta.status)}`);
+  }
   const out = Number(meta.statistics?.load?.outputRows || 0);
   console.log(`[debug] loaded ${out} rows into ${BQ_DATASET}.${BQ_FINAL}`);
   return out;
@@ -107,14 +125,14 @@ async function loadCsvGzToBQ(gcsUri) {
 
 /* ========== MAIN ========== */
 async function main() {
-  // basic env guardrail
+  // Guardrails
   if (!AUTH_KEY || !BQ_PROJECT || !BQ_DATASET || !BQ_FINAL || !BUCKET_NAME) {
     throw new Error(`Missing env: ${
       [
-        !AUTH_KEY && 'S1_AUTH_KEY',
-        !BQ_PROJECT && 'BQ_PROJECT',
-        !BQ_DATASET && 'BQ_DATASET',
-        !BQ_FINAL && 'BQ_TABLE',
+        !AUTH_KEY    && 'S1_AUTH_KEY',
+        !BQ_PROJECT  && 'BQ_PROJECT',
+        !BQ_DATASET  && 'BQ_DATASET',
+        !BQ_FINAL    && 'BQ_TABLE',
         !BUCKET_NAME && 'GCS_BUCKET/GCS_BUCKET_NAME'
       ].filter(Boolean).join(', ')
     }`);
@@ -123,22 +141,22 @@ async function main() {
   const ymd = targetYMD();
   console.log(`Starting S1 pull for ${REPORT_TYPE} ymd=${ymd}`);
 
-  // 1) Create report
+  // 1) Request report
   const reportId = await requestReport(AUTH_KEY);
   console.log(`report_id=${reportId}`);
 
-  // 2) Poll status → get content_url
+  // 2) Poll status → content_url
   const contentUrl = await pollStatus(reportId, AUTH_KEY);
   console.log(`content_url=${contentUrl}`);
 
-  // 3) Build fixed bucket/object path (prefix is just a folder)
+  // 3) Compose bucket/object path deterministically
   const objectPath = `${GCS_PREFIX}/${REPORT_TYPE}/${SITE_NAME}/${ymd}.csv.gz`;
   console.log(`[debug] bucketName=${BUCKET_NAME} objectPath=${objectPath}`);
 
-  // 4) Download to GCS
+  // 4) Download → GCS
   await downloadToGCS(contentUrl, BUCKET_NAME, objectPath);
 
-  // 5) Load to BigQuery (append)
+  // 5) Load → BigQuery (from GCS)
   const gcsUri = `gs://${BUCKET_NAME}/${objectPath}`;
   await loadCsvGzToBQ(gcsUri);
 
